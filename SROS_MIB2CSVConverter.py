@@ -5,7 +5,7 @@ import re
 import csv
 
 # Get the current working directory
-current_directory = '/mnt/data'
+current_directory = './'
 
 # Read the OID numbers from numbers.txt
 oid_numbers = {}
