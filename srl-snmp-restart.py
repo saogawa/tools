@@ -1,66 +1,74 @@
 from netmiko import ConnectHandler
+from netmiko.exceptions import NetMikoTimeoutException, NetMikoAuthenticationException
 import json
+import yaml
+import sys
 import re
-from datetime import datetime
 
-# SR Linux connection details
-srl_device = {
-    'device_type': 'terminal_server',
-    'host': '10.59.132.60',
-    'username': 'admin',
-    'password': 'NokiaSrl1!',
-    'port': 22,
-    'fast_cli': False
-}
+def restart_snmp_server(host, username, password, use_yaml=False):
+    device = {
+        'device_type': 'nokia_srl',
+        'host': host,
+        'username': username,
+        'password': password,
+    }
 
-def enter_bash(conn):
-    conn.send_command_timing("bash", delay_factor=1)
+    result = {
+        'host': host,
+        'status': 'unknown',
+        'message': '',
+        'output': ''
+    }
 
-def run_srcli_json(conn, srcli_cmd):
-    full_cmd = f'sr_cli --output-format json {srcli_cmd}'
-    output = conn.send_command_timing(full_cmd, delay_factor=2)
-    return output
+    try:
+        net_connect = ConnectHandler(**device)
 
-def extract_last_change_from_json(raw_output):
-    match = re.search(r'\{.*\}', raw_output, re.DOTALL)
-    if not match:
-        raise ValueError("JSON not found in sr_cli output")
+        # Restart SNMP server application
+        net_connect.send_command(
+            'tools system app-management application snmp_server-mgmt restart',
+            read_timeout=30
+        )
 
-    json_text = match.group(0)
-    data = json.loads(json_text)
-    timestamp = data["system"]["app-management"]["application"][0]["last-change"]
-    iso_time = timestamp.split(" ")[0]  # Remove "(x minutes ago)"
-    return datetime.fromisoformat(iso_time.replace("Z", "+00:00"))
+        # Check post-restart status
+        raw_output = net_connect.send_command(
+            'info from state /system app-management application snmp_server-mgmt last-change',
+            read_timeout=30
+        )
 
-try:
-    print("Connecting to SR Linux...")
-    conn = ConnectHandler(**srl_device)
-    print("✅ Login successful\n")
+        # Extract last-change timestamp using regex
+        match = re.search(r'last-change\s+"([^"]+)"', raw_output)
+        last_change_value = match.group(1) if match else ''
 
-    enter_bash(conn)
+        result['output'] = last_change_value
 
-    # Step 1: before restart
-    before_raw = run_srcli_json(conn,
-        "info from state /system app-management application snmp_server-mgmt last-change")
-    before_dt = extract_last_change_from_json(before_raw)
+        if "now" in last_change_value.lower():
+            result['status'] = 'success'
+            result['message'] = "Restart successful (detected 'now')"
+        else:
+            result['status'] = 'failure'
+            result['message'] = "Restart may have failed (no 'now' in output)"
 
-    # Step 2: restart
-    conn.send_command_timing(
-        "sr_cli tools system app-management application snmp_server-mgmt restart", delay_factor=2)
+    except NetMikoTimeoutException:
+        result['status'] = 'error'
+        result['message'] = 'Connection timeout.'
+    except NetMikoAuthenticationException:
+        result['status'] = 'error'
+        result['message'] = 'Authentication failed.'
+    except Exception as e:
+        result['status'] = 'error'
+        result['message'] = f'Unexpected error: {str(e)}'
 
-    # Step 3: after restart
-    after_raw = run_srcli_json(conn,
-        "info from state /system app-management application snmp_server-mgmt last-change")
-    after_dt = extract_last_change_from_json(after_raw)
+    # Output in desired format
+    if use_yaml:
+        print(yaml.safe_dump(result, sort_keys=False))
+    else:
+        print(json.dumps(result, indent=2))
 
-    # Diff in seconds
-    delta_sec = int((after_dt - before_dt).total_seconds())
-
-    print(f"Last-change before restart : {before_dt.isoformat()}")
-    print(f"Last-change after restart  : {after_dt.isoformat()}")
-    print(f"⏱  Time delta: {delta_sec} seconds")
-
-    conn.disconnect()
-
-except Exception as e:
-    print(f"❌ Error: {e}")
+if __name__ == '__main__':
+    # Example usage
+    restart_snmp_server(
+        host='10.59.132.60',
+        username='admin',
+        password='NokiaSrl1!',
+        use_yaml=False  # Set to True for YAML output
+    )
